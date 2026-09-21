@@ -27,6 +27,8 @@ aien-provenance = { path = "../aien-protocols/crates/aien-provenance" }
 
 # Subsystem implementations composed from above
 aegis = { path = "../aegis-runtime" }
+aien-platform = { path = "../aien-sovereign-core/crates/aien-platform" }
+aien-platform-linux = { path = "../aien-sovereign-core/crates/aien-platform-linux" }
 aien-inference-abi = { path = "../aien-sovereign-core/crates/aien-inference-abi" }
 aien-kv-cache = { path = "../aien-sovereign-core/crates/aien-kv-cache" }
 aien-scheduler = { path = "../aien-sovereign-core/crates/aien-scheduler" }
