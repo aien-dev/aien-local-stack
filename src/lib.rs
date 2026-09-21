@@ -80,7 +80,11 @@ mod tests {
             isolation: parent_ctx.isolation,
         };
 
-        let receipt = stack.inference_service.branch_context(branch_req).await.unwrap();
+        let receipt = stack
+            .inference_service
+            .branch_context(branch_req)
+            .await
+            .unwrap();
         assert!(receipt.shared_pages > 0);
         assert_eq!(receipt.copied_pages, 0);
 

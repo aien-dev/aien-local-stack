@@ -8,8 +8,7 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let recipe_store = RecipeStore::with_storage_dir(&temp_dir)
         .expect("Failed to initialize file-backed RecipeStore");
 
-    let service = SovereignInferenceService::new_with_epoch(1)
-        .expect("Service creation failed");
+    let service = SovereignInferenceService::new_with_epoch(1).expect("Service creation failed");
 
     // Stage 1: Prefill root context with durable ContextRecipe
     let prompt: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
@@ -51,7 +50,11 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let m2 = service.get_kv_metrics().unwrap();
     assert_eq!(m2.used_blocks, 3, "Flat zero-copy invariant");
     for &b in &root_blocks {
-        assert_eq!(service.get_block_refcount(b), Some(4), "Root + 3 branches = 4");
+        assert_eq!(
+            service.get_block_refcount(b),
+            Some(4),
+            "Root + 3 branches = 4"
+        );
     }
 
     // Stage 3: True Branch Divergence
@@ -98,7 +101,9 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     assert_ne!(ctx0.logical_state_digest, ctx1.logical_state_digest);
 
     // Branch 2 remains unmodified and fully shared
-    let b2_blocks = service.get_block_table(branch_contexts[2].branch_id.0).unwrap();
+    let b2_blocks = service
+        .get_block_table(branch_contexts[2].branch_id.0)
+        .unwrap();
     assert_eq!(b2_blocks, root_blocks);
 
     // Snapshot Branch 0 state (including generated tokens) into durable recipe
@@ -109,7 +114,10 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
 
     // Stage 4: Zero-copy logical merge
     let winner_id = ctx0.branch_id.0;
-    let sibling_ids = [branch_contexts[1].branch_id.0, branch_contexts[2].branch_id.0];
+    let sibling_ids = [
+        branch_contexts[1].branch_id.0,
+        branch_contexts[2].branch_id.0,
+    ];
     service.select_branch(winner_id, &sibling_ids).unwrap();
 
     // Stage 5: Authentic Engine Crash & RecipeStore Recovery
@@ -120,12 +128,11 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     drop(service);
     drop(recipe_store);
 
-    let new_service = SovereignInferenceService::new_with_epoch(2)
-        .expect("Restart failed");
+    let new_service = SovereignInferenceService::new_with_epoch(2).expect("Restart failed");
     assert_eq!(new_service.runtime_epoch(), 2);
 
-    let recovered_recipe_store = RecipeStore::with_storage_dir(&temp_dir)
-        .expect("Failed to reload RecipeStore from disk");
+    let recovered_recipe_store =
+        RecipeStore::with_storage_dir(&temp_dir).expect("Failed to reload RecipeStore from disk");
 
     // Stale epoch rejected
     let stale_req = InferenceRequest {
@@ -146,7 +153,9 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     }
 
     // Recipe store recovery from disk
-    let verified_recipe = recovered_recipe_store.verify_and_get(&pre_crash_recipe_ref).unwrap();
+    let verified_recipe = recovered_recipe_store
+        .verify_and_get(&pre_crash_recipe_ref)
+        .unwrap();
     let (_recon_handle, recon_ctx) = new_service
         .reconstruct_from_recipe(winner_id, &verified_recipe)
         .unwrap();

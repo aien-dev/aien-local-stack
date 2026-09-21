@@ -1,0 +1,82 @@
+name: Sovereign CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test & Invariant Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout AIEN Local Stack Source
+        uses: actions/checkout@v4
+        with:
+          path: aien-local-stack
+
+      - name: Checkout AIEN Protocols Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aien-protocols
+          path: aien-protocols
+
+      - name: Checkout Aegis Runtime Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aegis-runtime
+          path: aegis-runtime
+
+      - name: Checkout AIEN Sovereign Core Dependency
+        uses: actions/checkout@v4
+        with:
+          repository: aien-dev/aien-sovereign-core
+          path: aien-sovereign-core
+
+      - name: Install Stable Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Verify Code Formatting
+        working-directory: aien-local-stack
+        run: cargo fmt --all -- --check
+
+      - name: Cargo Check
+        working-directory: aien-local-stack
+        run: cargo check --all-targets
+
+      - name: Cargo Clippy Invariant
+        working-directory: aien-local-stack
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Workspace Unit and Integration Tests
+        working-directory: aien-local-stack
+        run: cargo test --verbose -- --test-threads=1
+
+      - name: Enforce Zero Disk Secrets Invariant
+        working-directory: aien-local-stack
+        run: |
+          echo "Auditing repository for prohibited plaintext secret files..."
+          if find . -maxdepth 4 -name ".env*" -not -path "*/.git/*" -not -path "*/target/*" | grep -q .; then
+            echo "::error::Prohibited plaintext .env file found. Use an approved AIEN SecretProvider."
+            exit 1
+          fi
+          echo "Zero plaintext .env files verified."
+
+      - name: Enforce Sovereign Voice and Anti-Slop Invariant
+        working-directory: aien-local-stack
+        run: |
+          echo "Auditing repository for em dashes, en dashes, and formulaic tropes..."
+          BAD_CHARS=$(grep -rnE --exclude-dir=target --exclude-dir=.git --exclude="*.rs" --exclude="*.json" --exclude="*.safetensors" "—|–" src/ tests/ README.md || true)
+          if [ -n "$BAD_CHARS" ]; then
+            echo "::error::Em dashes or en dashes detected:"
+            echo "$BAD_CHARS"
+            exit 1
+          fi
+          echo "Sovereign voice compliance verified."
