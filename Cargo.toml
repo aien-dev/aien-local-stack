@@ -1,0 +1,38 @@
+[package]
+name = "aien-local-stack"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "In-process composition stack integrating AEGIS and Sovereign Core via AIEN protocols"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+parking_lot = "0.12"
+
+# Protocol crates
+aien-protocol-types = { path = "../aien-protocols/crates/aien-protocol-types" }
+aien-agent-state-abi = { path = "../aien-protocols/crates/aien-agent-state-abi" }
+aien-inference-protocol = { path = "../aien-protocols/crates/aien-inference-protocol" }
+aien-inference-client = { path = "../aien-protocols/crates/aien-inference-client" }
+aien-provenance = { path = "../aien-protocols/crates/aien-provenance" }
+
+# Subsystem implementations composed from above
+aegis = { path = "../aegis-runtime" }
+aien-inference-abi = { path = "../aien-sovereign-core/crates/aien-inference-abi" }
+aien-kv-cache = { path = "../aien-sovereign-core/crates/aien-kv-cache" }
+aien-scheduler = { path = "../aien-sovereign-core/crates/aien-scheduler" }
+
+[[bin]]
+name = "aien-stack"
+path = "src/main.rs"
+
+[lib]
+name = "aien_local_stack"
+path = "src/lib.rs"
