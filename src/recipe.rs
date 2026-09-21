@@ -115,10 +115,16 @@ impl RecipeStore {
                         self.recipes.write().insert(r.recipe_id, r.clone());
                         r
                     } else {
-                        return Err(format!("Recipe {} not found in store or disk", recipe_ref.recipe_id));
+                        return Err(format!(
+                            "Recipe {} not found in store or disk",
+                            recipe_ref.recipe_id
+                        ));
                     }
                 } else {
-                    return Err(format!("Recipe {} not found in store", recipe_ref.recipe_id));
+                    return Err(format!(
+                        "Recipe {} not found in store",
+                        recipe_ref.recipe_id
+                    ));
                 }
             }
         };

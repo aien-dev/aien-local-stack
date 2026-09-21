@@ -192,7 +192,9 @@ impl SovereignInferenceService {
         };
 
         let ctx_ref = branch_state.to_context_ref(self);
-        self.active_branches.lock().insert(root_branch_id, branch_state);
+        self.active_branches
+            .lock()
+            .insert(root_branch_id, branch_state);
 
         Ok((handle, ctx_ref))
     }
@@ -254,7 +256,11 @@ impl SovereignInferenceService {
 
     pub fn get_cow_faults(&self) -> usize {
         let runtime = self.runtime.lock();
-        runtime.kv_manager.as_ref().map(|m| m.read().cow_faults()).unwrap_or(0)
+        runtime
+            .kv_manager
+            .as_ref()
+            .map(|m| m.read().cow_faults())
+            .unwrap_or(0)
     }
 
     pub fn get_kv_metrics(&self) -> Option<KvMetrics> {
@@ -275,7 +281,9 @@ impl SovereignInferenceService {
         let branches = self.active_branches.lock();
         let state = branches.get(&branch_id)?;
         let root_len = recipe.root_prompt_tokens.len();
-        if state.tokens.len() >= root_len && state.tokens[..root_len] == recipe.root_prompt_tokens[..] {
+        if state.tokens.len() >= root_len
+            && state.tokens[..root_len] == recipe.root_prompt_tokens[..]
+        {
             let delta = state.tokens[root_len..].to_vec();
             Some(recipe.clone().with_branch_delta(branch_id, delta))
         } else {
@@ -283,7 +291,11 @@ impl SovereignInferenceService {
         }
     }
 
-    pub fn select_branch(&self, selected_branch: Uuid, sibling_branches: &[Uuid]) -> Result<(), String> {
+    pub fn select_branch(
+        &self,
+        selected_branch: Uuid,
+        sibling_branches: &[Uuid],
+    ) -> Result<(), String> {
         let mut runtime = self.runtime.lock();
         let mut branches = self.active_branches.lock();
 
@@ -328,7 +340,8 @@ impl InferenceService for SovereignInferenceService {
 
         let (generated_tokens, updated_ctx) = if let Some(ctx) = &req.context {
             let mut branches = self.active_branches.lock();
-            let state = branches.get_mut(&ctx.branch_id.0)
+            let state = branches
+                .get_mut(&ctx.branch_id.0)
                 .ok_or(InferenceError::ContextNotFound(ctx.context_id))?;
 
             if ctx.generation != state.generation {
@@ -350,7 +363,9 @@ impl InferenceService for SovereignInferenceService {
             if !delta_tokens.is_empty() {
                 runtime
                     .append_branch_tokens(BranchHandle(state.handle), &delta_tokens)
-                    .map_err(|e| InferenceError::Internal(format!("Failed to append branch tokens: {}", e)))?;
+                    .map_err(|e| {
+                        InferenceError::Internal(format!("Failed to append branch tokens: {}", e))
+                    })?;
                 state.tokens.extend_from_slice(&delta_tokens);
             }
 
@@ -359,7 +374,12 @@ impl InferenceService for SovereignInferenceService {
             for _ in 0..max_tokens {
                 match runtime.decode_branch_step(BranchHandle(state.handle)) {
                     Ok((tok, _)) => tokens.push(tok),
-                    Err(e) => return Err(InferenceError::Internal(format!("Decode step failed: {}", e))),
+                    Err(e) => {
+                        return Err(InferenceError::Internal(format!(
+                            "Decode step failed: {}",
+                            e
+                        )))
+                    }
                 }
             }
 
@@ -370,7 +390,8 @@ impl InferenceService for SovereignInferenceService {
             // Advance branch state
             state.generation = state.generation.next();
             state.token_count = state.tokens.len() as u64;
-            state.logical_state_digest = BranchState::compute_digest(&state.branch_id, &state.tokens);
+            state.logical_state_digest =
+                BranchState::compute_digest(&state.branch_id, &state.tokens);
 
             let new_ctx_ref = state.to_context_ref(self);
             (tokens, Some(new_ctx_ref))
@@ -412,8 +433,12 @@ impl InferenceService for SovereignInferenceService {
     ) -> Result<BranchContextReceipt, InferenceError> {
         let parent_state = {
             let branches = self.active_branches.lock();
-            branches.get(&req.parent_context.branch_id.0).cloned()
-                .ok_or(InferenceError::ContextNotFound(req.parent_context.context_id))?
+            branches
+                .get(&req.parent_context.branch_id.0)
+                .cloned()
+                .ok_or(InferenceError::ContextNotFound(
+                    req.parent_context.context_id,
+                ))?
         };
 
         let mut runtime = self.runtime.lock();
@@ -421,7 +446,8 @@ impl InferenceService for SovereignInferenceService {
             .fork_context(ContextHandle(parent_state.handle))
             .map_err(|e| InferenceError::Internal(format!("Fork context failed: {}", e)))?;
 
-        let receipt = runtime.get_usage_receipt(child_handle)
+        let receipt = runtime
+            .get_usage_receipt(child_handle)
             .map_err(|e| InferenceError::Internal(format!("Usage receipt failed: {}", e)))?;
 
         let child_state = BranchState {
@@ -443,7 +469,9 @@ impl InferenceService for SovereignInferenceService {
         };
 
         let child_context_ref = child_state.to_context_ref(self);
-        self.active_branches.lock().insert(req.child_branch_id.0, child_state);
+        self.active_branches
+            .lock()
+            .insert(req.child_branch_id.0, child_state);
 
         Ok(BranchContextReceipt {
             operation_id: req.operation_id,
