@@ -262,6 +262,27 @@ impl SovereignInferenceService {
         runtime.kv_manager.as_ref().map(|m| m.read().metrics())
     }
 
+    pub fn get_branch_tokens(&self, branch_id: Uuid) -> Option<Vec<u32>> {
+        let branches = self.active_branches.lock();
+        branches.get(&branch_id).map(|s| s.tokens.clone())
+    }
+
+    pub fn snapshot_branch_recipe(
+        &self,
+        branch_id: Uuid,
+        recipe: &ContextRecipe,
+    ) -> Option<ContextRecipe> {
+        let branches = self.active_branches.lock();
+        let state = branches.get(&branch_id)?;
+        let root_len = recipe.root_prompt_tokens.len();
+        if state.tokens.len() >= root_len && state.tokens[..root_len] == recipe.root_prompt_tokens[..] {
+            let delta = state.tokens[root_len..].to_vec();
+            Some(recipe.clone().with_branch_delta(branch_id, delta))
+        } else {
+            None
+        }
+    }
+
     pub fn select_branch(&self, selected_branch: Uuid, sibling_branches: &[Uuid]) -> Result<(), String> {
         let mut runtime = self.runtime.lock();
         let mut branches = self.active_branches.lock();
@@ -341,6 +362,10 @@ impl InferenceService for SovereignInferenceService {
                     Err(e) => return Err(InferenceError::Internal(format!("Decode step failed: {}", e))),
                 }
             }
+
+            // Ingest generated tokens into logical branch state so state.tokens,
+            // token_count, and logical_state_digest accurately reflect post-generation state
+            state.tokens.extend_from_slice(&tokens);
 
             // Advance branch state
             state.generation = state.generation.next();

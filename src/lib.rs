@@ -66,7 +66,7 @@ mod tests {
 
         let prompt: Vec<u32> = (1..=32).collect();
         let recipe = ContextRecipe::new(prompt.clone());
-        stack.recipe_store.insert(recipe.clone());
+        stack.recipe_store.insert(recipe.clone()).unwrap();
 
         let (_root_h, parent_ctx) = stack
             .inference_service

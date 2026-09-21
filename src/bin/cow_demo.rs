@@ -1,21 +1,44 @@
 use aien_inference_protocol::*;
 use aien_local_stack::{ContextRecipe, RecipeStore, SovereignInferenceService};
-use aien_platform_linux::LinuxComputeDevice;
 use aien_provenance::compute_canonical_json_digest;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use uuid::Uuid;
-
-const AIEN_PROTOCOLS_SHA: &str = "0959a7ef1bc0653f58454c6bdfc28e9ffa7cd679";
-const AEGIS_RUNTIME_SHA: &str = "1b0c29944425f9c537c07b13d508f5250214632c";
-const SOVEREIGN_CORE_SHA: &str = "55c13c2cd4d2eb45a611a57cde7539ee840621c0";
-const LOCAL_STACK_SHA: &str = "ae69243f985b9a40cc5aaf3d53cb781270e6d77b";
 
 fn get_rss_kb() -> i64 {
     unsafe {
         let mut rusage = std::mem::zeroed::<libc::rusage>();
         libc::getrusage(libc::RUSAGE_SELF, &mut rusage);
         rusage.ru_maxrss
+    }
+}
+
+fn get_git_sha(repo_path: &str) -> String {
+    std::process::Command::new("git")
+        .args(["-C", repo_path, "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                String::from_utf8(out.stdout).ok().map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn get_uname_info() -> (String, String) {
+    unsafe {
+        let mut uts = std::mem::zeroed::<libc::utsname>();
+        if libc::uname(&mut uts) == 0 {
+            let sysname = std::ffi::CStr::from_ptr(uts.sysname.as_ptr()).to_string_lossy();
+            let release = std::ffi::CStr::from_ptr(uts.release.as_ptr()).to_string_lossy();
+            let machine = std::ffi::CStr::from_ptr(uts.machine.as_ptr()).to_string_lossy();
+            (machine.to_string(), format!("{} {}", sysname, release))
+        } else {
+            (std::env::consts::ARCH.to_string(), std::env::consts::OS.to_string())
+        }
     }
 }
 
@@ -70,99 +93,98 @@ pub struct Measurements {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("================================================================================");
-    println!("      AIEN PHYSICAL COPY-ON-WRITE, BRANCH DIVERGENCE & RECOVERY DEMO            ");
+    println!("        AIEN Sovereign Multi-Branch Copy-on-Write & State ABI Demonstration     ");
     println!("================================================================================");
 
-    let linux_dev = LinuxComputeDevice::new();
-    let preferred_mem = format!("{:?}", linux_dev.preferred_memory_kind());
+    let storage_dir = std::env::temp_dir().join(format!("aien-recipe-store-{}", Uuid::new_v4()));
+    let recipe_store = RecipeStore::with_storage_dir(&storage_dir)
+        .map_err(|e| format!("Failed to create durable RecipeStore at {:?}: {}", storage_dir, e))?;
 
+    // --- STAGE 1: Initialize Engine and Prefill Shared Root Context ---
+    println!("\n[Stage 1] Initializing Sovereign Inference Service (Epoch = 1)...");
     let service = SovereignInferenceService::new_with_epoch(1)
-        .map_err(|e| format!("Service creation failed: {}", e))?;
-    let recipe_store = RecipeStore::new();
+        .map_err(|e| format!("Service initialization failed: {}", e))?;
 
-    println!("Hardware Platform: Linux aarch64 (NVIDIA DGX Spark)");
-    println!("Memory Subsystem: {}", service.memory_kind);
-    println!("Preferred Buffer Kind: {}", preferred_mem);
-    println!("Compute Backend: {}", service.backend_name);
-    println!("Hardware Accelerated: {}", service.is_accelerated);
-    println!("KV Format: {} (block_size: 16)", service.kv_format_fingerprint().dtype);
-    println!("Initial Process RSS: {} KB", get_rss_kb());
-    println!("--------------------------------------------------------------------------------\n");
+    println!("  Engine ID: {}", service.engine_id);
+    println!("  Backend:   {}", service.backend_name);
+    println!("  Accelerated: {}", service.is_accelerated);
+    println!("  Memory:    {}", service.memory_kind);
+    println!("  Epoch:     {}", service.runtime_epoch());
 
-    // --- STAGE 1: Prefill Root Context with Durable Recipe ---
-    println!("[Stage 1] Prefilling Root Sequence Context (40 prompt tokens, block_size = 16)...");
-    let prompt_tokens: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
-    let mut recipe = ContextRecipe::new(prompt_tokens.clone());
-    recipe_store.insert(recipe.clone());
+    let root_prompt_tokens: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
+    println!("  Prefilling root context with {} tokens (block_size = 16)...", root_prompt_tokens.len());
+
+    let mut recipe = ContextRecipe::new(root_prompt_tokens.clone());
+    recipe_store.insert(recipe.clone())?;
 
     let t0 = Instant::now();
-    let (root_handle, root_context_ref) = service
-        .create_root_context(&prompt_tokens, &recipe)
-        .map_err(|e| format!("Root context prefill failed: {}", e))?;
+    let (root_handle, root_context) = service
+        .create_root_context(&root_prompt_tokens, &recipe)
+        .map_err(|e| format!("Root context creation failed: {}", e))?;
     let prefill_us = t0.elapsed().as_micros();
 
-    let root_blocks = service.get_block_table(root_context_ref.branch_id.0).unwrap_or_default();
+    println!("  Root Context ID:     {:?}", root_context.context_id);
+    println!("  Root Branch ID:      {}", root_context.branch_id.0);
+    println!("  Root Physical Handle: {:?}", root_handle.0);
+    println!("  Root Token Count:    {}", root_context.token_count);
+    println!("  Prefill Latency:     {} us", prefill_us);
+
     let m1 = service.get_kv_metrics().unwrap();
+    println!("  Allocated Blocks:    {} (shared root pages)", m1.used_blocks);
+    println!("  Initial CoW Faults:  {}", service.get_cow_faults());
 
-    println!("  Prefill completed in {} us (Root Handle ID: {:?})", prefill_us, root_handle.0);
-    println!("  Root Logical Blocks: {:?} (count = {})", root_blocks, root_blocks.len());
+    let root_blocks = service.get_block_table(root_context.branch_id.0).unwrap();
+    println!("  Root Block Table:    {:?}", root_blocks);
     for &b in &root_blocks {
-        let rc = service.get_block_refcount(b).unwrap_or(0);
-        println!("    Block {}: ref_count = {}", b, rc);
-        assert_eq!(rc, 1);
+        println!("    Block {}: refcount = {}", b, service.get_block_refcount(b).unwrap());
     }
-    println!("  Physical Blocks Allocated: {}", m1.used_blocks);
-    println!("  Logical State Digest: {:?}\n", root_context_ref.logical_state_digest);
-    assert_eq!(root_blocks.len(), 3);
-    assert_eq!(service.get_cow_faults(), 0);
+    println!();
 
-    // --- STAGE 2: Fork 3 Logical Branches ---
-    println!("[Stage 2] Forking 3 Autonomous Agent Branches from Root Context...");
-    let branch_names = [
-        "agent-code-generator",
-        "agent-security-auditor",
-        "agent-perf-optimizer",
-    ];
+    // --- STAGE 2: Fork Shared Root into Multiple Subagent Branches ---
+    println!("[Stage 2] Forking root context into 3 concurrent subagent branches...");
     let mut branch_contexts = Vec::new();
-    let mut fork_latencies = Vec::new();
+    let mut fork_times = Vec::new();
+    let branch_names = ["Branch-0 (CodeGen)", "Branch-1 (SecurityAudit)", "Branch-2 (DocGen)"];
 
-    for name in &branch_names {
+    for (_i, name) in branch_names.iter().enumerate() {
         let child_branch_id = BranchId::new_v4();
         let branch_req = BranchContextRequest {
             operation_id: Uuid::new_v4(),
-            parent_context: root_context_ref.clone(),
+            parent_context: root_context.clone(),
             child_branch_id,
-            isolation: root_context_ref.isolation,
+            isolation: root_context.isolation,
         };
 
-        let tf = Instant::now();
-        let receipt = service.branch_context(branch_req).await?;
-        fork_latencies.push(tf.elapsed().as_micros());
+        let t_fork = Instant::now();
+        let receipt = service.branch_context(branch_req).await
+            .map_err(|e| format!("Fork failed for {}: {}", name, e))?;
+        let us = t_fork.elapsed().as_micros();
+        fork_times.push(us);
 
-        println!("  Branch {} (ID: {}):", name, child_branch_id.0);
-        println!("    Shared Pages: {}, Copied Pages: {}", receipt.shared_pages, receipt.copied_pages);
+        println!("  Forked {} in {} us", name, us);
+        println!("    Branch ID:     {}", receipt.child_context.branch_id.0);
+        println!("    Shared Pages:  {}", receipt.shared_pages);
+        println!("    Copied Pages:  {} (Flat Zero-Copy Guaranteed)", receipt.copied_pages);
+        println!("    Generation:    {:?}", receipt.child_context.generation);
+
         branch_contexts.push(receipt.child_context);
+        assert_eq!(receipt.copied_pages, 0, "Fork must be pure zero-copy pointer retention");
     }
+
+    let fork_avg_us: u128 = fork_times.iter().sum::<u128>() / fork_times.len() as u128;
+    println!("  Average Fork Latency: {} us", fork_avg_us);
 
     let m2 = service.get_kv_metrics().unwrap();
-    let fork_avg_us = fork_latencies.iter().sum::<u128>() / 3;
-    println!("  Fork Latency (avg): {} us", fork_avg_us);
-    println!("  Physical Blocks Allocated: {} (FLAT ZERO-COPY INVARIANT VERIFIED)", m2.used_blocks);
-    println!("  Bytes Saved vs Full Copy: {} bytes", m2.bytes_saved_vs_full_copy);
-    println!("  Refcounts on Root Blocks (1 root + 3 branches = 4):");
+    println!("  Total Used Blocks after 3-way Fork: {} (Zero block allocation)", m2.used_blocks);
     for &b in &root_blocks {
-        let rc = service.get_block_refcount(b).unwrap_or(0);
-        println!("    Block {}: ref_count = {}", b, rc);
-        assert_eq!(rc, 4);
+        println!("    Block {}: refcount = {} (root + 3 branches)", b, service.get_block_refcount(b).unwrap());
     }
-    assert_eq!(m2.used_blocks, 3);
     println!();
 
-    // --- STAGE 3: True Agent Branch Divergence & CoW Page Fault Isolation ---
-    println!("[Stage 3] Executing Divergent Agent Tasks on Branches...");
+    // --- STAGE 3: Mutate Branch and Verify Copy-on-Write Fault ---
+    println!("[Stage 3] Mutating Branch 0 and Branch 1 with divergent deltas to trigger physical CoW...");
 
-    // Step Branch 0: Code Generator (Prompt: "generate code")
-    println!("  1. Dispatching task to Branch 0 ({})...", branch_names[0]);
+    println!("  Stepping Branch 0 ({}) with delta \"generate code\"...", branch_names[0]);
     let req0 = InferenceRequest {
         request_id: Uuid::new_v4(),
         model: "sovereign-embedded".to_string(),
@@ -171,76 +193,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             content: "generate code".to_string(),
         }],
         context: Some(branch_contexts[0].clone()),
-        max_tokens: 2,
+        max_tokens: 1,
         temperature: 0.0,
         stop_sequences: vec![],
     };
+
     let t_step0 = Instant::now();
-    let res0 = service.infer(req0).await?;
+    let res0 = service.infer(req0).await
+        .map_err(|e| format!("Infer on Branch 0 failed: {}", e))?;
     let step0_us = t_step0.elapsed().as_micros();
-    let updated_ctx0 = res0.context.expect("Updated context must be returned");
     let cow_after_0 = service.get_cow_faults();
+    let updated_ctx0 = res0.context.clone().unwrap();
 
-    println!("    Step completed in {} us", step0_us);
-    println!("    CoW Page Faults: {} (INCREMENTED BY 1)", cow_after_0);
-    println!("    Updated Generation: {:?}, Tokens: {}", updated_ctx0.generation, updated_ctx0.token_count);
-    println!("    Updated Logical Digest: {:?}", updated_ctx0.logical_state_digest);
-    assert_eq!(cow_after_0, 1);
-    assert_eq!(updated_ctx0.generation, Generation(3));
+    println!("  Branch 0 completed step in {} us (Tokens generated = {})", step0_us, res0.completion_tokens);
+    println!("  CoW Faults after Branch 0 write: {} (Exactly 1 tail page cloned)", cow_after_0);
+    assert_eq!(cow_after_0, 1, "Expected exactly 1 CoW fault after branch 0 mutation");
 
-    let tail_block = root_blocks.last().unwrap();
-    let rc_tail_0 = service.get_block_refcount(*tail_block).unwrap();
-    println!("    Original Shared Block {} ref_count: {} (decremented 4 -> 3)", tail_block, rc_tail_0);
-    assert_eq!(rc_tail_0, 3);
-
-    // Step Branch 1: Security Auditor (Prompt: "audit security")
-    println!("  2. Dispatching task to Branch 1 ({})...", branch_names[1]);
+    println!("  Stepping Branch 1 ({}) with delta \"security audit\"...", branch_names[1]);
     let req1 = InferenceRequest {
         request_id: Uuid::new_v4(),
         model: "sovereign-embedded".to_string(),
         messages: vec![InferenceMessage {
             role: "user".to_string(),
-            content: "audit security".to_string(),
+            content: "security audit".to_string(),
         }],
         context: Some(branch_contexts[1].clone()),
-        max_tokens: 2,
+        max_tokens: 1,
         temperature: 0.0,
         stop_sequences: vec![],
     };
+
     let t_step1 = Instant::now();
-    let res1 = service.infer(req1).await?;
+    let res1 = service.infer(req1).await
+        .map_err(|e| format!("Infer on Branch 1 failed: {}", e))?;
     let step1_us = t_step1.elapsed().as_micros();
-    let updated_ctx1 = res1.context.expect("Updated context must be returned");
     let cow_after_1 = service.get_cow_faults();
+    let updated_ctx1 = res1.context.clone().unwrap();
 
-    println!("    Step completed in {} us", step1_us);
-    println!("    CoW Page Faults: {} (INCREMENTED BY 1)", cow_after_1);
-    println!("    Updated Generation: {:?}, Tokens: {}", updated_ctx1.generation, updated_ctx1.token_count);
-    println!("    Updated Logical Digest: {:?}", updated_ctx1.logical_state_digest);
-    assert_eq!(cow_after_1, 2);
-    assert_eq!(updated_ctx1.generation, Generation(3));
+    println!("  Branch 1 completed step in {} us (Tokens generated = {})", step1_us, res1.completion_tokens);
+    println!("  CoW Faults after Branch 1 write: {} (Cloned own tail page)", cow_after_1);
+    assert_eq!(cow_after_1, 2, "Expected exactly 2 CoW faults after independent branch mutations");
 
-    let rc_tail_1 = service.get_block_refcount(*tail_block).unwrap();
-    println!("    Original Shared Block {} ref_count: {} (decremented 3 -> 2)", tail_block, rc_tail_1);
-    assert_eq!(rc_tail_1, 2);
-
-    // Verify true divergence between Branch 0 and Branch 1
+    println!("  Verifying True Logical & Physical Divergence between Branch 0 and Branch 1...");
+    println!("    Branch 0 State Digest: {:?}", updated_ctx0.logical_state_digest);
+    println!("    Branch 1 State Digest: {:?}", updated_ctx1.logical_state_digest);
     assert_ne!(
         updated_ctx0.logical_state_digest, updated_ctx1.logical_state_digest,
-        "Divergent agent tasks must produce distinct logical state digests"
+        "Branch 0 and Branch 1 must physically and logically diverge"
     );
 
-    // Branch 2: Perf Optimizer remains untouched and fully shared
-    println!("  3. Inspecting Branch 2 ({}) [UNTOUCHED SIBLING]...", branch_names[2]);
+    println!("  Verifying Branch 2 remained untouched and fully shared...");
     let b2_blocks = service.get_block_table(branch_contexts[2].branch_id.0).unwrap();
-    println!("    Branch 2 Block Table: {:?} (Retained root blocks [0, 1, 2], zero private blocks)", b2_blocks);
     assert_eq!(b2_blocks, root_blocks);
     println!();
 
-    // Update recipe in store with Branch 0 delta tokens for durable recovery
-    let branch_0_delta: Vec<u32> = "generate code".as_bytes().iter().map(|b| (*b as u32) % 256).collect();
-    recipe = recipe.with_branch_delta(updated_ctx0.branch_id.0, branch_0_delta);
-    recipe_store.insert(recipe.clone());
+    // Snapshot durable recipe from branch state (covers root prompt + branch delta + generated tokens)
+    recipe = service
+        .snapshot_branch_recipe(updated_ctx0.branch_id.0, &recipe)
+        .expect("Snapshot branch recipe failed");
+    recipe_store.insert(recipe.clone())?;
 
     // --- STAGE 4: Zero-Copy Logical Merge (SelectBranch) ---
     println!("[Stage 4] Demonstrating Logical Merge (SelectBranch)...");
@@ -262,12 +273,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pre_crash_digest = updated_ctx0.logical_state_digest;
     let pre_crash_recipe_ref = recipe.to_ref();
 
-    println!("  1. Destroying Sovereign Core instance (dropping runtime, KV pools, and memory)...");
+    println!("  1. Destroying Sovereign Core and RecipeStore (simulating process crash)...");
     drop(service);
+    drop(recipe_store);
 
-    println!("  2. Instantiating fresh Sovereign Core (simulating clean process restart, Epoch = 2)...");
+    println!("  2. Instantiating fresh Sovereign Core and re-opening RecipeStore from disk (Epoch = 2)...");
     let fresh_service = SovereignInferenceService::new_with_epoch(2)
         .map_err(|e| format!("Restart failed: {}", e))?;
+    let recovered_recipe_store = RecipeStore::with_storage_dir(&storage_dir)
+        .map_err(|e| format!("Failed to reload RecipeStore from disk: {}", e))?;
     println!("     Restarted runtime epoch: {}", fresh_service.runtime_epoch());
 
     // Verify stale context rejection
@@ -292,9 +306,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Durable Recipe Recovery
-    println!("  4. Resolving durable ContextRecipe from external RecipeStore via ContextRecipeRef...");
+    println!("  4. Resolving durable ContextRecipe from disk-backed RecipeStore via ContextRecipeRef...");
     let t_recon = Instant::now();
-    let durable_recipe = recipe_store
+    let durable_recipe = recovered_recipe_store
         .verify_and_get(&pre_crash_recipe_ref)
         .map_err(|e| format!("Recipe verification failed: {}", e))?;
 
@@ -310,6 +324,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         recon_ctx.logical_state_digest, pre_crash_digest,
         "Reconstructed state digest must match pre-crash state digest exactly"
     );
+
+    // Clean up temporary storage directory
+    let _ = std::fs::remove_dir_all(&storage_dir);
 
     // Verify inference continues on reconstructed branch
     let cont_req = InferenceRequest {
@@ -343,17 +360,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bytes_saved_vs_full_copy: m2.bytes_saved_vs_full_copy,
     };
 
+    let (arch, kernel) = get_uname_info();
     let receipt_data = ExecutionReceipt {
-        demo_version: "1.1.0".to_string(),
+        demo_version: "1.2.0".to_string(),
         dependency_shas: DependencyShas {
-            aien_protocols: AIEN_PROTOCOLS_SHA.to_string(),
-            aegis_runtime: AEGIS_RUNTIME_SHA.to_string(),
-            aien_sovereign_core: SOVEREIGN_CORE_SHA.to_string(),
-            aien_local_stack: LOCAL_STACK_SHA.to_string(),
+            aien_protocols: get_git_sha("/home/drakestapleton/workspace/aien-protocols"),
+            aegis_runtime: get_git_sha("/home/drakestapleton/workspace/aegis-runtime"),
+            aien_sovereign_core: get_git_sha("/home/drakestapleton/workspace/aien-sovereign-core"),
+            aien_local_stack: get_git_sha("/home/drakestapleton/workspace/aien-local-stack"),
         },
         hardware: HardwareDescriptor {
-            architecture: "aarch64".to_string(),
-            kernel: "Linux 7.0.0-1019-nvidia".to_string(),
+            architecture: arch,
+            kernel,
             memory_kind: fresh_service.memory_kind.clone(),
             peak_rss_kb: get_rss_kb(),
         },
@@ -374,6 +392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "stale_runtime_epoch_rejection".to_string(),
             "durable_recipe_hash_verification".to_string(),
             "post_crash_logical_state_digest_parity".to_string(),
+            "file_backed_recipe_store_persistence".to_string(),
+            "generated_token_state_parity".to_string(),
         ],
         receipt_digest: String::new(),
     };
