@@ -1,16 +1,16 @@
 {
   "demo_version": "1.2.0",
   "dependency_shas": {
-    "aien_protocols": "9e3d8ddd7681d29b5fa015a14f2db2cef8fa0bfb",
+    "aien_protocols": "1a197e521443c0721321d520ed7830d4f385e8a5",
     "aegis_runtime": "d8d4585bf8889ab3548430c984850118da9be306",
     "aien_sovereign_core": "2b7bcb5e6733f93843f9af55b10c8d1cc74486c9",
-    "aien_local_stack": "d5f9254acf48e806f9750ce526d68222efc769ab"
+    "aien_local_stack": "56e5d76c9954b6fb76d7dcb9b21b922332ed15b5"
   },
   "hardware": {
     "architecture": "aarch64",
     "kernel": "Linux 7.0.0-1019-nvidia",
     "memory_kind": "AtsSystem (Hardware Coherent Grace-Blackwell)",
-    "peak_rss_kb": 192480
+    "peak_rss_kb": 192880
   },
   "runtime": {
     "engine_id": "aien-sovereign-gb10",
@@ -20,12 +20,12 @@
     "block_size": 16
   },
   "measurements": {
-    "prefill_latency_us": 6572,
-    "fork_latency_avg_us": 67,
-    "branch_0_step_us": 4439,
-    "branch_1_step_us": 4731,
-    "zero_copy_merge_us": 4,
-    "recipe_reconstruction_us": 7881,
+    "prefill_latency_us": 7038,
+    "fork_latency_avg_us": 65,
+    "branch_0_step_us": 4418,
+    "branch_1_step_us": 4705,
+    "zero_copy_merge_us": 3,
+    "recipe_reconstruction_us": 8916,
     "total_cow_faults": 2,
     "bytes_saved_vs_full_copy": 73728
   },
@@ -41,5 +41,5 @@
     "file_backed_recipe_store_persistence",
     "generated_token_state_parity"
   ],
-  "receipt_digest": "f588fa83898e34ef63254d6096b74d4e0506f15ab4d497e7ff811ee4eb7a5b18"
+  "receipt_digest": "d878ff999099c904a5148ba2c3728e531f6175e499719dec3e2be63f5cbd4ab2"
 }
