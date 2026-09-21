@@ -1,6 +1,8 @@
+pub mod recipe;
 pub mod sovereign_service;
 
-pub use sovereign_service::SovereignInferenceService;
+pub use recipe::{ContextRecipe, RecipeStore, SharedRecipeStore};
+pub use sovereign_service::{BranchState, SovereignInferenceService};
 
 use aegis::inference::ProtocolInferenceBackend;
 use std::sync::Arc;
@@ -8,6 +10,7 @@ use std::sync::Arc;
 pub struct LocalStack {
     pub inference_service: Arc<SovereignInferenceService>,
     pub protocol_backend: Arc<ProtocolInferenceBackend>,
+    pub recipe_store: Arc<RecipeStore>,
 }
 
 impl LocalStack {
@@ -17,10 +20,12 @@ impl LocalStack {
             sovereign.clone(),
             "sovereign-embedded-model".to_string(),
         ));
+        let recipe_store = Arc::new(RecipeStore::new());
 
         Ok(Self {
             inference_service: sovereign,
             protocol_backend: backend,
+            recipe_store,
         })
     }
 }
@@ -29,7 +34,6 @@ impl LocalStack {
 mod tests {
     use super::*;
     use aien_inference_protocol::*;
-    use aien_protocol_types::Digest32;
 
     #[tokio::test]
     async fn test_local_stack_in_process_composition() {
@@ -60,40 +64,14 @@ mod tests {
     async fn test_local_stack_branch_and_cow() {
         let stack = LocalStack::new().expect("Failed to initialize LocalStack");
 
-        let parent_ctx = InferenceContextRef {
-            abi_version: 1,
-            context_id: ContextId::new_v4(),
-            branch_id: BranchId::new_v4(),
-            generation: Generation(1),
-            model: ModelFingerprint {
-                weights_digest: Digest32([0u8; 32]),
-                model_config_digest: Digest32([0u8; 32]),
-            },
-            tokenizer: TokenizerFingerprint {
-                tokenizer_digest: Digest32([0u8; 32]),
-            },
-            kv_format: KvFormatFingerprint {
-                format_version: 1,
-                dtype: "BF16".to_string(),
-            },
-            logical_state_digest: Digest32([0u8; 32]),
-            token_count: 32,
-            lineage: ContextLineage {
-                parent_context: None,
-                parent_branch: None,
-                parent_digest: None,
-                fork_token_index: None,
-            },
-            isolation: CacheIsolationKey {
-                domain_id: uuid::Uuid::new_v4(),
-                domain_digest: Digest32([1u8; 32]),
-            },
-            binding: None,
-            recovery: ContextRecipeRef {
-                recipe_id: uuid::Uuid::new_v4(),
-                recipe_digest: Digest32([2u8; 32]),
-            },
-        };
+        let prompt: Vec<u32> = (1..=32).collect();
+        let recipe = ContextRecipe::new(prompt.clone());
+        stack.recipe_store.insert(recipe.clone());
+
+        let (_root_h, parent_ctx) = stack
+            .inference_service
+            .create_root_context(&prompt, &recipe)
+            .expect("create root context");
 
         let branch_req = BranchContextRequest {
             operation_id: uuid::Uuid::new_v4(),
@@ -121,5 +99,9 @@ mod tests {
 
         let res = stack.inference_service.infer(infer_req).await.unwrap();
         assert_eq!(res.completion_tokens, 2);
+        assert!(res.context.is_some());
+        let ctx = res.context.unwrap();
+        assert_eq!(ctx.generation, Generation(3)); // 1 root -> 2 fork -> 3 after step
+        assert!(ctx.token_count > 32);
     }
 }

@@ -1,99 +1,64 @@
 use aien_inference_protocol::*;
-use aien_local_stack::SovereignInferenceService;
-use aien_protocol_types::Digest32;
+use aien_local_stack::{ContextRecipe, RecipeStore, SovereignInferenceService};
 use uuid::Uuid;
 
 #[tokio::test]
-async fn test_flagship_cow_multi_branch_gb10_lifecycle() {
-    let service = SovereignInferenceService::new_default()
-        .expect("Failed to create SovereignInferenceService");
+async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
+    let service = SovereignInferenceService::new_with_epoch(1)
+        .expect("Service creation failed");
+    let recipe_store = RecipeStore::new();
 
-    // Stage 1: Prefill root sequence context (40 tokens = 2 full blocks + 1 partial block)
-    let root_ctx_id = Uuid::new_v4();
-    let root_branch_id = Uuid::new_v4();
-    let prompt_tokens: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
+    // Stage 1: Prefill root context with durable ContextRecipe
+    let prompt: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
+    let mut recipe = ContextRecipe::new(prompt.clone());
+    recipe_store.insert(recipe.clone());
 
-    let _root_handle = service
-        .register_context(root_branch_id, &prompt_tokens)
-        .expect("Root context prefill failed");
+    let (_root_handle, root_context) = service
+        .create_root_context(&prompt, &recipe)
+        .expect("create root context failed");
 
-    let root_blocks = service.get_block_table(root_branch_id).unwrap();
-    assert_eq!(root_blocks.len(), 3, "40 tokens / 16 block_size must allocate 3 blocks");
+    assert_eq!(root_context.generation, Generation(1));
+    assert_eq!(root_context.token_count, 40);
+    assert_eq!(root_context.kv_format.dtype, "FP32");
+    assert_eq!(service.get_cow_faults(), 0);
+
+    let root_blocks = service.get_block_table(root_context.branch_id.0).unwrap();
+    assert_eq!(root_blocks.len(), 3);
     for &b in &root_blocks {
         assert_eq!(service.get_block_refcount(b), Some(1));
     }
-    assert_eq!(service.get_cow_faults(), 0);
 
-    let root_context_ref = InferenceContextRef {
-        abi_version: 1,
-        context_id: ContextId(root_ctx_id),
-        branch_id: BranchId(root_branch_id),
-        generation: Generation(1),
-        model: ModelFingerprint {
-            weights_digest: Digest32([1u8; 32]),
-            model_config_digest: Digest32([2u8; 32]),
-        },
-        tokenizer: TokenizerFingerprint {
-            tokenizer_digest: Digest32([3u8; 32]),
-        },
-        kv_format: KvFormatFingerprint {
-            format_version: 1,
-            dtype: "BF16".to_string(),
-        },
-        logical_state_digest: Digest32([4u8; 32]),
-        token_count: 40,
-        lineage: ContextLineage {
-            parent_context: None,
-            parent_branch: None,
-            parent_digest: None,
-            fork_token_index: None,
-        },
-        isolation: CacheIsolationKey {
-            domain_id: Uuid::new_v4(),
-            domain_digest: Digest32([5u8; 32]),
-        },
-        binding: Some(OpaqueBindingRef {
-            engine_id: "aien-sovereign-gb10".to_string(),
-            runtime_epoch: service.runtime_epoch(),
-            binding_id: root_branch_id,
-            lease_generation: 1,
-        }),
-        recovery: ContextRecipeRef {
-            recipe_id: Uuid::new_v4(),
-            recipe_digest: Digest32([6u8; 32]),
-        },
-    };
-
-    // Stage 2: Fork into 3 agent branches
+    // Stage 2: Fork into 3 branches
     let mut branch_contexts = Vec::new();
     for _ in 0..3 {
         let child_branch_id = BranchId::new_v4();
         let branch_req = BranchContextRequest {
             operation_id: Uuid::new_v4(),
-            parent_context: root_context_ref.clone(),
+            parent_context: root_context.clone(),
             child_branch_id,
-            isolation: root_context_ref.isolation,
+            isolation: root_context.isolation,
         };
         let receipt = service.branch_context(branch_req).await.unwrap();
         assert_eq!(receipt.shared_pages, 3);
         assert_eq!(receipt.copied_pages, 0);
+        assert_eq!(receipt.child_context.generation, Generation(2));
         branch_contexts.push(receipt.child_context);
     }
 
     let m2 = service.get_kv_metrics().unwrap();
-    assert_eq!(m2.used_blocks, 3, "Flat zero-copy invariant across forks");
+    assert_eq!(m2.used_blocks, 3, "Flat zero-copy invariant");
     for &b in &root_blocks {
-        assert_eq!(service.get_block_refcount(b), Some(4), "1 root + 3 branches = ref_count 4");
+        assert_eq!(service.get_block_refcount(b), Some(4), "Root + 3 branches = 4");
     }
 
-    // Stage 3: Divergent token emissions & CoW page fault isolation
-    // Step Branch 0
+    // Stage 3: True Branch Divergence
+    // Branch 0 receives "gen" delta
     let req0 = InferenceRequest {
         request_id: Uuid::new_v4(),
-        model: "sovereign-gb10".to_string(),
+        model: "sovereign-embedded".to_string(),
         messages: vec![InferenceMessage {
             role: "user".to_string(),
-            content: "code-gen".to_string(),
+            content: "gen".to_string(),
         }],
         context: Some(branch_contexts[0].clone()),
         max_tokens: 1,
@@ -101,19 +66,17 @@ async fn test_flagship_cow_multi_branch_gb10_lifecycle() {
         stop_sequences: vec![],
     };
     let res0 = service.infer(req0).await.unwrap();
-    assert_eq!(res0.completion_tokens, 1);
-    assert_eq!(service.get_cow_faults(), 1, "Branch 0 triggers exactly 1 CoW fault");
+    let ctx0 = res0.context.unwrap();
+    assert_eq!(service.get_cow_faults(), 1);
+    assert_eq!(ctx0.generation, Generation(3));
 
-    let tail_block = *root_blocks.last().unwrap();
-    assert_eq!(service.get_block_refcount(tail_block), Some(3));
-
-    // Step Branch 1
+    // Branch 1 receives "sec" delta
     let req1 = InferenceRequest {
         request_id: Uuid::new_v4(),
-        model: "sovereign-gb10".to_string(),
+        model: "sovereign-embedded".to_string(),
         messages: vec![InferenceMessage {
             role: "user".to_string(),
-            content: "security-audit".to_string(),
+            content: "sec".to_string(),
         }],
         context: Some(branch_contexts[1].clone()),
         max_tokens: 1,
@@ -121,66 +84,76 @@ async fn test_flagship_cow_multi_branch_gb10_lifecycle() {
         stop_sequences: vec![],
     };
     let res1 = service.infer(req1).await.unwrap();
-    assert_eq!(res1.completion_tokens, 1);
-    assert_eq!(service.get_cow_faults(), 2, "Branch 1 triggers second CoW fault");
-    assert_eq!(service.get_block_refcount(tail_block), Some(2));
+    let ctx1 = res1.context.unwrap();
+    assert_eq!(service.get_cow_faults(), 2);
+    assert_eq!(ctx1.generation, Generation(3));
 
-    // Branch 2 remains unmodified
+    // Verify true logical divergence
+    assert_ne!(ctx0.logical_state_digest, ctx1.logical_state_digest);
+
+    // Branch 2 remains unmodified and fully shared
     let b2_blocks = service.get_block_table(branch_contexts[2].branch_id.0).unwrap();
     assert_eq!(b2_blocks, root_blocks);
 
-    // Stage 4: Logical Merge (SelectBranch)
-    let winner_id = branch_contexts[0].branch_id.0;
+    // Record Branch 0 delta in recipe store
+    let delta0: Vec<u32> = "gen".as_bytes().iter().map(|b| (*b as u32) % 256).collect();
+    recipe = recipe.with_branch_delta(ctx0.branch_id.0, delta0);
+    recipe_store.insert(recipe.clone());
+
+    // Stage 4: Zero-copy logical merge
+    let winner_id = ctx0.branch_id.0;
     let sibling_ids = [branch_contexts[1].branch_id.0, branch_contexts[2].branch_id.0];
     service.select_branch(winner_id, &sibling_ids).unwrap();
 
-    // Stage 5: Crash & Epoch Recovery from ContextRecipeRef
-    let old_epoch = service.bump_runtime_epoch();
+    // Stage 5: Authentic Engine Crash & RecipeStore Recovery
+    let pre_crash_digest = ctx0.logical_state_digest;
+    let pre_crash_recipe_ref = recipe.to_ref();
+
+    drop(service); // Complete destruction of engine instance
+
+    let new_service = SovereignInferenceService::new_with_epoch(2)
+        .expect("Restart failed");
+    assert_eq!(new_service.runtime_epoch(), 2);
+
+    // Stale epoch rejected
     let stale_req = InferenceRequest {
         request_id: Uuid::new_v4(),
-        model: "sovereign-gb10".to_string(),
+        model: "sovereign-embedded".to_string(),
         messages: vec![InferenceMessage {
             role: "user".to_string(),
-            content: "resume".to_string(),
+            content: "continue".to_string(),
         }],
-        context: Some(branch_contexts[0].clone()),
+        context: Some(ctx0.clone()),
         max_tokens: 1,
         temperature: 0.0,
         stop_sequences: vec![],
     };
-    match service.infer(stale_req).await {
+    match new_service.infer(stale_req).await {
         Err(InferenceError::StaleRuntimeEpoch) => {}
         other => panic!("Expected StaleRuntimeEpoch, got {:?}", other),
     }
 
-    // Reconstruct from recipe
-    let mut recipe_tokens = prompt_tokens.clone();
-    recipe_tokens.push(42);
-    let recon_id = Uuid::new_v4();
-    let _recon_handle = service.reconstruct_from_recipe(recon_id, &recipe_tokens).unwrap();
+    // Recipe store recovery
+    let verified_recipe = recipe_store.verify_and_get(&pre_crash_recipe_ref).unwrap();
+    let (_recon_handle, recon_ctx) = new_service
+        .reconstruct_from_recipe(winner_id, &verified_recipe)
+        .unwrap();
 
-    let mut recon_ctx = branch_contexts[0].clone();
-    recon_ctx.branch_id = BranchId(recon_id);
-    recon_ctx.binding = Some(OpaqueBindingRef {
-        engine_id: "aien-sovereign-gb10".to_string(),
-        runtime_epoch: service.runtime_epoch(),
-        binding_id: recon_id,
-        lease_generation: 1,
-    });
+    assert_eq!(recon_ctx.logical_state_digest, pre_crash_digest);
 
-    let recon_req = InferenceRequest {
+    // Continued inference
+    let cont_req = InferenceRequest {
         request_id: Uuid::new_v4(),
-        model: "sovereign-gb10".to_string(),
+        model: "sovereign-embedded".to_string(),
         messages: vec![InferenceMessage {
             role: "user".to_string(),
-            content: "continue".to_string(),
+            content: "next".to_string(),
         }],
         context: Some(recon_ctx),
         max_tokens: 1,
         temperature: 0.0,
         stop_sequences: vec![],
     };
-    let recon_res = service.infer(recon_req).await.unwrap();
-    assert_eq!(recon_res.completion_tokens, 1);
-    assert_eq!(service.runtime_epoch(), old_epoch);
+    let cont_res = new_service.infer(cont_req).await.unwrap();
+    assert_eq!(cont_res.completion_tokens, 1);
 }
