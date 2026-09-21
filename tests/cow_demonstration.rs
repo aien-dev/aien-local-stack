@@ -4,14 +4,17 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
+    let temp_dir = std::env::temp_dir().join(format!("aien-test-recipe-store-{}", Uuid::new_v4()));
+    let recipe_store = RecipeStore::with_storage_dir(&temp_dir)
+        .expect("Failed to initialize file-backed RecipeStore");
+
     let service = SovereignInferenceService::new_with_epoch(1)
         .expect("Service creation failed");
-    let recipe_store = RecipeStore::new();
 
     // Stage 1: Prefill root context with durable ContextRecipe
     let prompt: Vec<u32> = (1..=40).map(|x| (x * 7) % 256).collect();
     let mut recipe = ContextRecipe::new(prompt.clone());
-    recipe_store.insert(recipe.clone());
+    recipe_store.insert(recipe.clone()).unwrap();
 
     let (_root_handle, root_context) = service
         .create_root_context(&prompt, &recipe)
@@ -69,6 +72,8 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let ctx0 = res0.context.unwrap();
     assert_eq!(service.get_cow_faults(), 1);
     assert_eq!(ctx0.generation, Generation(3));
+    // 40 root tokens + 3 "gen" delta tokens + 1 generated token = 44 tokens
+    assert_eq!(ctx0.token_count, 44);
 
     // Branch 1 receives "sec" delta
     let req1 = InferenceRequest {
@@ -87,6 +92,7 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let ctx1 = res1.context.unwrap();
     assert_eq!(service.get_cow_faults(), 2);
     assert_eq!(ctx1.generation, Generation(3));
+    assert_eq!(ctx1.token_count, 44);
 
     // Verify true logical divergence
     assert_ne!(ctx0.logical_state_digest, ctx1.logical_state_digest);
@@ -95,10 +101,11 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let b2_blocks = service.get_block_table(branch_contexts[2].branch_id.0).unwrap();
     assert_eq!(b2_blocks, root_blocks);
 
-    // Record Branch 0 delta in recipe store
-    let delta0: Vec<u32> = "gen".as_bytes().iter().map(|b| (*b as u32) % 256).collect();
-    recipe = recipe.with_branch_delta(ctx0.branch_id.0, delta0);
-    recipe_store.insert(recipe.clone());
+    // Snapshot Branch 0 state (including generated tokens) into durable recipe
+    recipe = service
+        .snapshot_branch_recipe(ctx0.branch_id.0, &recipe)
+        .expect("Snapshot recipe failed");
+    recipe_store.insert(recipe.clone()).unwrap();
 
     // Stage 4: Zero-copy logical merge
     let winner_id = ctx0.branch_id.0;
@@ -109,11 +116,16 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
     let pre_crash_digest = ctx0.logical_state_digest;
     let pre_crash_recipe_ref = recipe.to_ref();
 
-    drop(service); // Complete destruction of engine instance
+    // Complete destruction of engine instance and recipe store memory
+    drop(service);
+    drop(recipe_store);
 
     let new_service = SovereignInferenceService::new_with_epoch(2)
         .expect("Restart failed");
     assert_eq!(new_service.runtime_epoch(), 2);
+
+    let recovered_recipe_store = RecipeStore::with_storage_dir(&temp_dir)
+        .expect("Failed to reload RecipeStore from disk");
 
     // Stale epoch rejected
     let stale_req = InferenceRequest {
@@ -133,15 +145,18 @@ async fn test_flagship_cow_multi_branch_hardened_lifecycle() {
         other => panic!("Expected StaleRuntimeEpoch, got {:?}", other),
     }
 
-    // Recipe store recovery
-    let verified_recipe = recipe_store.verify_and_get(&pre_crash_recipe_ref).unwrap();
+    // Recipe store recovery from disk
+    let verified_recipe = recovered_recipe_store.verify_and_get(&pre_crash_recipe_ref).unwrap();
     let (_recon_handle, recon_ctx) = new_service
         .reconstruct_from_recipe(winner_id, &verified_recipe)
         .unwrap();
 
     assert_eq!(recon_ctx.logical_state_digest, pre_crash_digest);
+    assert_eq!(recon_ctx.token_count, 44);
 
-    // Continued inference
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    // Continued inference on reconstructed branch
     let cont_req = InferenceRequest {
         request_id: Uuid::new_v4(),
         model: "sovereign-embedded".to_string(),
