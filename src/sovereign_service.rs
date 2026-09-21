@@ -2,6 +2,7 @@ use aien_inference_abi::transformer_backend::NativeTransformerBackend;
 use aien_inference_abi::weights::TransformerWeights;
 use aien_inference_abi::{BranchHandle, ContextHandle, ModelConfig};
 use aien_inference_protocol::*;
+use aien_kv_cache::KvMetrics;
 use aien_protocol_types::ProtocolVersion;
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -15,6 +16,7 @@ pub struct SovereignInferenceService {
     runtime: Arc<Mutex<NativeTransformerBackend>>,
     config: ModelConfig,
     active_branches: Arc<Mutex<HashMap<uuid::Uuid, u64>>>,
+    epoch: Arc<AtomicU64>,
 }
 
 impl SovereignInferenceService {
@@ -26,6 +28,7 @@ impl SovereignInferenceService {
             runtime: Arc::new(Mutex::new(runtime)),
             config: config.clone(),
             active_branches: Arc::new(Mutex::new(HashMap::new())),
+            epoch: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -44,6 +47,16 @@ impl SovereignInferenceService {
         Self::new_with_reference_weights(&config)
     }
 
+    pub fn runtime_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    pub fn bump_runtime_epoch(&self) -> u64 {
+        let new_epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.active_branches.lock().clear();
+        new_epoch
+    }
+
     pub fn get_active_branch_handle(&self, id: uuid::Uuid) -> Option<u64> {
         self.active_branches.lock().get(&id).copied()
     }
@@ -54,11 +67,70 @@ impl SovereignInferenceService {
         self.active_branches.lock().insert(id, handle.0);
         Ok(handle)
     }
+
+    pub fn reconstruct_from_recipe(&self, branch_id: uuid::Uuid, prompt_tokens: &[u32]) -> Result<ContextHandle, String> {
+        self.register_context(branch_id, prompt_tokens)
+    }
+
+    pub fn get_block_table(&self, id: uuid::Uuid) -> Option<Vec<usize>> {
+        let handle = self.active_branches.lock().get(&id).copied()?;
+        let runtime = self.runtime.lock();
+        let kv_mgr = runtime.kv_manager.as_ref()?;
+        let mgr = kv_mgr.read();
+        let tbl = mgr.get_block_table(handle)?;
+        Some(tbl.block_ids.clone())
+    }
+
+    pub fn get_block_refcount(&self, block_id: usize) -> Option<usize> {
+        let runtime = self.runtime.lock();
+        let kv_mgr = runtime.kv_manager.as_ref()?;
+        let mgr = kv_mgr.read();
+        mgr.get_block(block_id).map(|b| b.ref_count)
+    }
+
+    pub fn get_cow_faults(&self) -> usize {
+        let runtime = self.runtime.lock();
+        runtime.kv_manager.as_ref().map(|m| m.read().cow_faults()).unwrap_or(0)
+    }
+
+    pub fn get_kv_metrics(&self) -> Option<KvMetrics> {
+        let runtime = self.runtime.lock();
+        runtime.kv_manager.as_ref().map(|m| m.read().metrics())
+    }
+
+    pub fn select_branch(&self, selected_branch: uuid::Uuid, sibling_branches: &[uuid::Uuid]) -> Result<(), String> {
+        let mut runtime = self.runtime.lock();
+        let mut branches = self.active_branches.lock();
+
+        if !branches.contains_key(&selected_branch) {
+            return Err(format!("Selected branch {} not found", selected_branch));
+        }
+
+        for &sibling in sibling_branches {
+            if sibling == selected_branch {
+                continue;
+            }
+            if let Some(h) = branches.remove(&sibling) {
+                let _ = runtime.release_branch(BranchHandle(h));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl InferenceService for SovereignInferenceService {
     async fn infer(&self, req: InferenceRequest) -> Result<InferenceResponse, InferenceError> {
+        if let Some(ctx) = &req.context {
+            if let Some(binding) = &ctx.binding {
+                let current_epoch = self.runtime_epoch();
+                if binding.runtime_epoch != current_epoch {
+                    return Err(InferenceError::StaleRuntimeEpoch);
+                }
+            }
+        }
+
         let mut prompt_tokens = vec![1u32];
         for msg in &req.messages {
             for b in msg.content.as_bytes() {
@@ -150,6 +222,12 @@ impl InferenceService for SovereignInferenceService {
         child_context.generation = child_context.generation.next();
         child_context.lineage.parent_context = Some(req.parent_context.context_id);
         child_context.lineage.parent_branch = Some(req.parent_context.branch_id);
+        child_context.binding = Some(OpaqueBindingRef {
+            engine_id: "aien-sovereign-gb10".to_string(),
+            runtime_epoch: self.runtime_epoch(),
+            binding_id: req.child_branch_id.0,
+            lease_generation: 1,
+        });
 
         Ok(BranchContextReceipt {
             operation_id: req.operation_id,
