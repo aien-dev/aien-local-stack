@@ -1,3 +1,7 @@
+> Archived: this repository is no longer authoritative. Canonical runtime: https://github.com/aien-dev/aien-sovereign-core (composition example pending fold-in).
+>
+> History is preserved read-only.
+
 # aien-local-stack
 
 In-process composition stack integrating AEGIS and Sovereign Core via AIEN protocols.
