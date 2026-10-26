@@ -2,7 +2,7 @@
 name = "aien-local-stack"
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0-only"
+license = "Apache-2.0 WITH LLVM-exception"
 description = "In-process composition stack integrating AEGIS and Sovereign Core via AIEN protocols"
 
 [dependencies]

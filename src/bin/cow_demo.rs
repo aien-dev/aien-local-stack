@@ -464,13 +464,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (arch, kernel) = get_uname_info();
+    let ws = format!(
+        "{}/workspace",
+        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+    );
     let receipt_data = ExecutionReceipt {
         demo_version: "1.2.0".to_string(),
         dependency_shas: DependencyShas {
-            aien_protocols: get_git_sha("/home/drakestapleton/workspace/aien-protocols"),
-            aegis_runtime: get_git_sha("/home/drakestapleton/workspace/aegis-runtime"),
-            aien_sovereign_core: get_git_sha("/home/drakestapleton/workspace/aien-sovereign-core"),
-            aien_local_stack: get_git_sha("/home/drakestapleton/workspace/aien-local-stack"),
+            aien_protocols: get_git_sha(&format!("{ws}/aien-protocols")),
+            aegis_runtime: get_git_sha(&format!("{ws}/aegis-runtime")),
+            aien_sovereign_core: get_git_sha(&format!("{ws}/aien-sovereign-core")),
+            aien_local_stack: get_git_sha(&format!("{ws}/aien-local-stack")),
         },
         hardware: HardwareDescriptor {
             architecture: arch,
