@@ -84,7 +84,7 @@ impl SovereignInferenceService {
         let mem_kind = match device.preferred_memory_kind() {
             LinuxMemoryKind::AtsSystem => "AtsSystem (Hardware Coherent Grace-Blackwell)",
             LinuxMemoryKind::HmmSystem => "HmmSystem (Heterogeneous Memory Management)",
-            LinuxMemoryKind::CudaManagedFallback => "CudaManagedFallback",
+            LinuxMemoryKind::External => "External (engine-owned host-visible pool)",
         };
 
         Ok(Self {
